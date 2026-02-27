@@ -17,6 +17,11 @@ import type {
 	CodexAgentSettings,
 } from "../domain/models/agent-config";
 import { toAgentConfig } from "../shared/settings-utils";
+import {
+	LlmanClaudeSecretsError,
+	parseUseLlmanDirective,
+	resolveClaudeEnvFromLlman,
+} from "../shared/llman-claude-secrets";
 
 // ============================================================================
 // Types
@@ -227,7 +232,7 @@ function findAgentSettings(
 /**
  * Build AgentConfig with API key injection for known agents.
  */
-function buildAgentConfigWithApiKey(
+async function buildAgentConfigWithApiKey(
 	settings: AgentClientPluginSettings,
 	agentSettings: BaseAgentSettings,
 	agentId: string,
@@ -235,8 +240,34 @@ function buildAgentConfigWithApiKey(
 ) {
 	const baseConfig = toAgentConfig(agentSettings, workingDirectory);
 
-	// Add API keys to environment for Claude, Codex, and Gemini
 	if (agentId === settings.claude.id) {
+		const useLlman = parseUseLlmanDirective(baseConfig.env);
+		if (useLlman.enabled) {
+			const llman = await resolveClaudeEnvFromLlman(useLlman.selection);
+
+			// Remove secrets and directive from settings-provided env to avoid
+			// persisting/depending on plaintext keys when USE_LLMAN is enabled.
+			const filteredEnv: Record<string, string> = { ...baseConfig.env };
+			for (const key of Object.keys(filteredEnv)) {
+				const upper = key.toUpperCase();
+				if (
+					upper === "USE_LLMAN" ||
+					upper === "ANTHROPIC_API_KEY" ||
+					upper === "ANTHROPIC_AUTH_TOKEN"
+				) {
+					delete filteredEnv[key];
+				}
+			}
+
+			return {
+				...baseConfig,
+				env: {
+					...llman.env,
+					...filteredEnv,
+				},
+			};
+		}
+
 		const claudeSettings = agentSettings as ClaudeAgentSettings;
 		return {
 			...baseConfig,
@@ -391,7 +422,7 @@ export function useAgentSession(
 				}
 
 				// Build AgentConfig with API key injection
-				const agentConfig = buildAgentConfigWithApiKey(
+				const agentConfig = await buildAgentConfigWithApiKey(
 					settings,
 					agentSettings,
 					agentId,
@@ -501,6 +532,14 @@ export function useAgentSession(
 			} catch (error) {
 				// Error - update to error state
 				setSession((prev) => ({ ...prev, state: "error" }));
+				if (error instanceof LlmanClaudeSecretsError) {
+					setErrorInfo({
+						title: error.title,
+						message: error.message,
+						suggestion: error.suggestion,
+					});
+					return;
+				}
 				setErrorInfo({
 					title: "Session Creation Failed",
 					message: `Failed to create new session: ${error instanceof Error ? error.message : String(error)}`,
@@ -564,7 +603,7 @@ export function useAgentSession(
 				}
 
 				// Build AgentConfig with API key injection
-				const agentConfig = buildAgentConfigWithApiKey(
+				const agentConfig = await buildAgentConfigWithApiKey(
 					settings,
 					agentSettings,
 					defaultAgentId,
@@ -639,6 +678,14 @@ export function useAgentSession(
 			} catch (error) {
 				// Error - update to error state
 				setSession((prev) => ({ ...prev, state: "error" }));
+				if (error instanceof LlmanClaudeSecretsError) {
+					setErrorInfo({
+						title: error.title,
+						message: error.message,
+						suggestion: error.suggestion,
+					});
+					return;
+				}
 				setErrorInfo({
 					title: "Session Loading Failed",
 					message: `Failed to load session: ${error instanceof Error ? error.message : String(error)}`,
